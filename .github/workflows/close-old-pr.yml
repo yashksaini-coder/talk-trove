@@ -1,36 +1,70 @@
-name: Close Old Pull Requests
+name: Close Old Issues
 
 on:
   schedule:
-    - cron: '0 0 * * *'  
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
 
 permissions:
-  pull-requests: write  
+  issues: write
+
 jobs:
-  close-old-prs:
+  close-old-issues:
     runs-on: ubuntu-latest
     steps:
-      - name: Close Pull Requests Older Than 30 Days
-        uses: actions/github-script@v6  
+      - name: Close Issues Older Than 30 Days
+        uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const daysOld = 30; // Customize the number of days to consider "old"
+            const daysOld = 30; // Number of days to consider "old"
+            const excludeLabels = ['pinned', 'do-not-close']; // Labels to exclude
             const daysAgo = new Date(Date.now() - (1000 * 60 * 60 * 24 * daysOld));
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
 
-            const { data: prs } = await github.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              since: daysAgo.toISOString(),
-            });
-
-            for (const pr of prs) {
-              console.log(`Closing pull request #${pr.number} (last updated: ${pr.updated_at})`);
-              await github.pulls.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pr.number,
-                state: 'closed',
+            try {
+              // Fetch open issues updated before the threshold
+              const { data: issues } = await github.issues.listForRepo({
+                owner,
+                repo,
+                state: 'open',
+                per_page: 100,  // Max per page
+                since: daysAgo.toISOString(),
               });
+
+              // Filter issues that are older than 30 days
+              const oldIssues = issues.filter(issue => 
+                new Date(issue.updated_at) < daysAgo &&
+                !issue.pull_request && // Exclude PRs
+                !issue.labels.some(label => excludeLabels.includes(label.name)) // Exclude issues with specific labels
+              );
+
+              if (oldIssues.length === 0) {
+                console.log('No old issues found to close.');
+                return;
+              }
+
+              for (const issue of oldIssues) {
+                console.log(`Closing issue #${issue.number} (last updated: ${issue.updated_at})`);
+                
+                await github.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+
+                // Optionally, leave a comment on the closed issue
+                await github.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body: `This issue has been automatically closed as it has not had recent activity for ${daysOld} days.`,
+                });
+              }
+
+              console.log(`${oldIssues.length} issue(s) successfully closed.`);
+            } catch (error) {
+              console.error('Error closing old issues:', error);
+              throw error;
             }
